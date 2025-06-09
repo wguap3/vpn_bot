@@ -13,8 +13,7 @@ import org.telegram.telegrambots.meta.api.methods.AnswerPreCheckoutQuery;
 import org.telegram.telegrambots.meta.api.methods.invoices.SendInvoice;
 import org.telegram.telegrambots.meta.api.methods.send.SendDocument;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
-import org.telegram.telegrambots.meta.api.objects.InputFile;
-import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.*;
 import org.telegram.telegrambots.meta.api.objects.payments.LabeledPrice;
 import org.telegram.telegrambots.meta.api.objects.payments.PreCheckoutQuery;
 import org.telegram.telegrambots.meta.api.objects.payments.SuccessfulPayment;
@@ -23,12 +22,19 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKe
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
 import java.io.*;
+import java.io.File;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import org.telegram.telegrambots.meta.api.methods.updatingmessages.DeleteMessage;
+import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMarkup;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
 
 @Component
 @RequiredArgsConstructor
@@ -37,16 +43,11 @@ public class TelegramBot extends TelegramLongPollingBot {
     private final BotConfig botConfig;
     private final PaymentConfig paymentConfig;
 
-    // Хранилища данных
-    private final Map<Long, LocalDate> subscriptions = new HashMap<>();
-    private final Map<Long, String> clientNames = new HashMap<>();
-
     // Тарифы VPN (месяцы -> цена в копейках)
     private final Map<Integer, Integer> vpnPlans = Map.of(
             1, 7000,   // 70 руб
-            2, 14000,  // 140 руб
-            3, 21000,  // 210 руб
-            4, 25000   // 250 руб
+            2, 14000 // 140 руб
+              // 250 руб
     );
 
     @Override
@@ -82,11 +83,18 @@ public class TelegramBot extends TelegramLongPollingBot {
         String text = update.getMessage().getText();
         Long chatId = update.getMessage().getChatId();
 
-        switch (text) {
-            case "/start" -> sendStartMessage(chatId);
-            case "/buy" -> showPlans(chatId);
-            case "/status" -> checkStatus(chatId, update.getMessage().getFrom().getId());
-            default -> sendMessage(chatId, "Неизвестная команда. Используйте /buy для покупки VPN.");
+        if (text.equals("/start") || text.equals("⬅️ Главное меню")) {
+            sendStartMessage(chatId);
+        } else if (text.equals("🛒 Купить подписку")) {
+            showPlans(chatId);
+        } else if (text.equals("📊 Статус подписки")) {
+            checkStatus(chatId, update.getMessage().getFrom().getId());
+        } else if (text.equals("📄 Инструкция по установке")) {
+            sendInstallInstructions(chatId);
+        } else if (text.equals("🆘 Поддержка")) {
+            sendSupportInfo(chatId);
+        }else {
+            sendMessage(chatId, "Пожалуйста, используйте кнопки меню ⬇️");
         }
     }
 
@@ -94,16 +102,46 @@ public class TelegramBot extends TelegramLongPollingBot {
         String text = """
                 🔐 <b>Добро пожаловать в VPN сервис!</b>
                 
-                <b>Доступные команды:</b>
-                /buy - Купить подписку
-                /status - Проверить статус
+                <b>Используйте кнопки ниже для управления:</b>
                 
                 <b>Наши преимущества:</b>
                 ✓ Высокая скорость
                 ✓ Безлимитный трафик
-                ✓ Без логов""";
+                ✓ Простое подключение""";
 
-        sendHtmlMessage(chatId, text);
+        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
+        keyboard.setResizeKeyboard(true);
+        keyboard.setOneTimeKeyboard(false);
+
+        List<KeyboardRow> rows = new ArrayList<>();
+
+        KeyboardRow row1 = new KeyboardRow();
+        row1.add("🛒 Купить подписку");
+        rows.add(row1);
+
+        KeyboardRow row2 = new KeyboardRow();
+        row2.add("📊 Статус подписки");
+        rows.add(row2);
+
+        KeyboardRow row3 = new KeyboardRow();
+        row3.add("📄 Инструкция по установке");
+        rows.add(row3);
+
+        KeyboardRow row4 = new KeyboardRow();
+        row4.add("🆘 Поддержка");
+        rows.add(row4);
+
+
+        keyboard.setKeyboard(rows);
+
+        SendMessage message = SendMessage.builder()
+                .chatId(chatId.toString())
+                .text(text)
+                .parseMode("HTML")
+                .replyMarkup(keyboard)
+                .build();
+
+        execute(message);
     }
 
     private void showPlans(Long chatId) throws TelegramApiException {
@@ -111,7 +149,7 @@ public class TelegramBot extends TelegramLongPollingBot {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
 
         vpnPlans.forEach((months, price) -> {
-            String buttonText = String.format("%d месяц - %d руб", months, price / 100);
+            String buttonText = String.format("%d месяц(а) - %d руб", months, price / 100);
             rows.add(List.of(
                     InlineKeyboardButton.builder()
                             .text(buttonText)
@@ -120,20 +158,36 @@ public class TelegramBot extends TelegramLongPollingBot {
             ));
         });
 
+        // Кнопка "Назад"
+        rows.add(List.of(
+                InlineKeyboardButton.builder()
+                        .text("⬅️ Назад")
+                        .callbackData("back_to_main")
+                        .build()
+        ));
+
         markup.setKeyboard(rows);
 
-        sendMessage(chatId, "Выберите срок подписки:", markup);
+        SendMessage message = SendMessage.builder()
+                .chatId(chatId.toString())
+                .text("<b>Выберите срок подписки:</b>")
+                .parseMode("HTML")
+                .replyMarkup(markup)
+                .build();
+
+        execute(message);
     }
 
-    private void handleCallback(org.telegram.telegrambots.meta.api.objects.CallbackQuery callback)
-            throws TelegramApiException {
-
+    private void handleCallback(CallbackQuery callback) throws TelegramApiException {
         String data = callback.getData();
         Long chatId = callback.getMessage().getChatId();
 
         if (data.startsWith("plan_")) {
             int months = Integer.parseInt(data.substring(5));
             createInvoice(chatId, months);
+        } else if ("back_to_main".equals(data)) {
+            sendStartMessage(chatId);
+            deleteMessage(chatId, callback.getMessage().getMessageId());
         }
     }
 
@@ -167,9 +221,7 @@ public class TelegramBot extends TelegramLongPollingBot {
         execute(answer);
     }
 
-    private void handleSuccessfulPayment(org.telegram.telegrambots.meta.api.objects.Message message)
-            throws TelegramApiException {
-
+    private void handleSuccessfulPayment(Message message) throws TelegramApiException {
         Long tgId = message.getFrom().getId();
         Long chatId = message.getChatId();
         SuccessfulPayment payment = message.getSuccessfulPayment();
@@ -181,7 +233,8 @@ public class TelegramBot extends TelegramLongPollingBot {
         Optional<UserDto> existingUserOpt = userService.findByTelegramId(tgId.toString());
 
         Instant newPaymentTime = Instant.now();
-        Instant newEndTime;
+        long hoursToAdd = months * 720L;
+        Instant newEndTime = newPaymentTime.plus(hoursToAdd, ChronoUnit.HOURS);
 
         if (existingUserOpt.isPresent()) {
             UserDto existingUser = existingUserOpt.get();
@@ -191,7 +244,7 @@ public class TelegramBot extends TelegramLongPollingBot {
                     ? existingUser.getEndTime()
                     : newPaymentTime;
 
-            newEndTime = base.plus(months, ChronoUnit.MINUTES);
+            newEndTime = base.plus(hoursToAdd, ChronoUnit.HOURS);
 
             User updatedUser = new User();
             updatedUser.setId(existingUser.getId());
@@ -201,7 +254,6 @@ public class TelegramBot extends TelegramLongPollingBot {
             updatedUser.setEndTime(newEndTime);
 
             userService.updateUser(updatedUser);
-
         } else {
             if (!generateVpnConfig(clientName)) {
                 sendMessage(chatId, "❌ Ошибка генерации конфига.");
@@ -212,15 +264,28 @@ public class TelegramBot extends TelegramLongPollingBot {
             request.setTelegramId(tgId.toString());
             request.setClientFilePath(clientPath);
             request.setPaymentTime(newPaymentTime);
-            request.setEndTime(newPaymentTime.plus(months, ChronoUnit.MINUTES));
+            request.setEndTime(newEndTime);
 
             userService.createUser(request);
         }
+
         unblockClient(clientName);
         sendVpnFile(chatId, clientName);
-        sendMessage(chatId, "✅ Подписка активирована или продлена. Конфигурация отправлена.");
-    }
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
+                .withZone(ZoneId.of("UTC")); // указываем часовой пояс, например UTC
 
+        String formattedDate = formatter.format(newEndTime);
+        String successText = """
+                ✅Подписка активирована!
+                
+                Доступ до: %s
+                
+                Конфигурационный файл отправлен отдельным сообщением.
+                
+                Если вы уже являлись нашим клиентом конфигурационный файл менять не нужно!""".formatted(formattedDate);
+
+        sendMessage(chatId, successText);
+    }
 
     private boolean generateVpnConfig(String clientName) {
         try {
@@ -241,6 +306,21 @@ public class TelegramBot extends TelegramLongPollingBot {
             return false;
         }
     }
+    private void sendInstallInstructions(Long chatId) throws TelegramApiException {
+        String text = """
+            📄 Инструкция по установке VPN:
+
+            1. Скачайте конфигурационный файл (.ovpn), который мы отправили.
+            2. Установите приложение OpenVPN:
+               • Android — OpenVPN for Android
+               • iOS — OpenVPN Connect
+               • Windows/macOS — с официального сайта openvpn.net
+            3. Импортируйте файл в приложение.
+            4. Подключитесь, используя импортированный профиль.
+            """;
+
+        sendMessage(chatId, text);
+    }
 
     private void sendVpnFile(Long chatId, String clientName) throws TelegramApiException {
         File file = new File("/home/user/openvpn-clients/" + clientName + ".ovpn");
@@ -256,29 +336,34 @@ public class TelegramBot extends TelegramLongPollingBot {
                 .build();
 
         execute(doc);
-        sendMessage(chatId, "⚙️ (Mock) Файл конфигурации для " + clientName + " отправлен.");
     }
 
     private void checkStatus(Long chatId, Long userId) throws TelegramApiException {
         Optional<UserDto> userOpt = userService.findByTelegramId(userId.toString());
 
         if (userOpt.isEmpty()) {
-            sendHtmlMessage(chatId, "❌ У вас нет активной подписки");
+            sendMessage(chatId, "❌ У вас нет активной подписки");
             return;
         }
 
         UserDto user = userOpt.get();
         Instant now = Instant.now();
 
+        // Создаем форматтер даты
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
+                .withZone(ZoneId.of("UTC")); // или свой часовой пояс
+
+        String formattedEndTime = formatter.format(user.getEndTime());
+
         if (user.getEndTime().isAfter(now)) {
-            sendMessage(chatId, "✅ Подписка активна до: " + user.getEndTime());
+            sendMessage(chatId, "✅ Подписка активна до: " + formattedEndTime);
         } else {
-            sendMessage(chatId, "❌ Подписка истекла: " + user.getEndTime());
+            sendMessage(chatId, "❌ Подписка истекла: " + formattedEndTime);
         }
     }
 
 
-    @Scheduled(cron = "0 20 19 * * *", zone = "UTC")
+    @Scheduled(cron = "0 10 22 * * *", zone = "UTC")
     public void checkExpiredSubscriptions() {
         Instant now = Instant.now();
         System.out.println("Check started at: " + now);
@@ -290,7 +375,7 @@ public class TelegramBot extends TelegramLongPollingBot {
                 blockClient(user.getClientFilePath());
 
                 String message = "Ваша подписка истекла. Пожалуйста, продлите её для продолжения использования VPN.\n" +
-                        "Для продления введите команду: \\buy";
+                        "Для продления нажмите кнопку \"🛒 Купить подписку\"";
                 try {
                     sendMessage(Long.parseLong(user.getTelgramId()), message);
                 } catch (TelegramApiException e) {
@@ -299,41 +384,6 @@ public class TelegramBot extends TelegramLongPollingBot {
             }
         }
     }
-    private void blockClient(String filePath) {
-        String clientName = new File(filePath).getName().replace(".ovpn", "");
-        String clientIp = null;
-        String clientsFile = "/etc/openvpn/clients_ip.list";
-
-        try (BufferedReader br = new BufferedReader(new FileReader(clientsFile))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                String[] parts = line.trim().split("\\s+");
-                if (parts.length == 2 && parts[0].equals(clientName)) {
-                    clientIp = parts[1];
-                    break;
-                }
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-
-        if (clientIp == null) {
-            System.out.println("IP для клиента " + clientName + " не найден в " + clientsFile);
-            return;
-        }
-
-        try {
-            new ProcessBuilder("/bin/bash", "-c", "./block_client.sh " + clientIp)
-                    .directory(new File("/home/user"))
-                    .start()
-                    .waitFor();
-
-            System.out.println("🔒 Клиент " + clientName + " с IP " + clientIp + " заблокирован по IP");
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
 
     private void unblockClient(String clientName) {
         String clientIp = null;
@@ -352,61 +402,77 @@ public class TelegramBot extends TelegramLongPollingBot {
             e.printStackTrace();
         }
 
-        if (clientIp == null) {
-            System.out.println("IP для клиента " + clientName + " не найден в " + clientsFile);
-            return;
-        }
+        if (clientIp == null) return;
 
         try {
             new ProcessBuilder("/bin/bash", "-c", "./unblock_client.sh " + clientIp)
                     .directory(new File("/home/user"))
                     .start()
                     .waitFor();
-
-            System.out.println("✅ Клиент " + clientName + " с IP " + clientIp + " разблокирован по IP");
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-
-
-    private void revokeVpnAccess(String filePath) {
+    private void blockClient(String filePath) {
         String clientName = new File(filePath).getName().replace(".ovpn", "");
+        String clientIp = null;
+        String clientsFile = "/etc/openvpn/clients_ip.list";
+
+        try (BufferedReader br = new BufferedReader(new FileReader(clientsFile))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                String[] parts = line.trim().split("\\s+");
+                if (parts.length == 2 && parts[0].equals(clientName)) {
+                    clientIp = parts[1];
+                    break;
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        if (clientIp == null) return;
+
         try {
-            new ProcessBuilder("/bin/bash", "-c", "./revoke_client.sh " + clientName)
-                    .directory(new File("/home/user/easy-rsa"))
+            new ProcessBuilder("/bin/bash", "-c", "./block_client.sh " + clientIp)
+                    .directory(new File("/home/user"))
                     .start()
                     .waitFor();
         } catch (Exception e) {
             e.printStackTrace();
         }
-        System.out.println("Отозвали сертификат");
+    }
+    private void sendSupportInfo(Long chatId) throws TelegramApiException {
+        String text = """
+            🆘 <b>Поддержка</b>
+
+            Если у вас возникли вопросы или проблемы — напишите нам:
+            👉 <a href="https://t.me/wguap3">@wguap3</a>
+
+            Мы постараемся ответить как можно быстрее!
+            """;
+
+        SendMessage message = SendMessage.builder()
+                .chatId(chatId.toString())
+                .text(text)
+                .parseMode("HTML")
+                .build();
+
+        execute(message);
     }
 
+    private void deleteMessage(Long chatId, Integer messageId) throws TelegramApiException {
+        DeleteMessage deleteMessage = new DeleteMessage();
+        deleteMessage.setChatId(chatId.toString());
+        deleteMessage.setMessageId(messageId);
+        execute(deleteMessage);
+    }
 
     private void sendMessage(Long chatId, String text) throws TelegramApiException {
         execute(SendMessage.builder()
                 .chatId(chatId.toString())
                 .text(text)
-                .build());
-    }
-
-    private void sendHtmlMessage(Long chatId, String html) throws TelegramApiException {
-        execute(SendMessage.builder()
-                .chatId(chatId.toString())
-                .text(html)
-                .parseMode("HTML")
-                .build());
-    }
-
-    private void sendMessage(Long chatId, String text, InlineKeyboardMarkup markup)
-            throws TelegramApiException {
-
-        execute(SendMessage.builder()
-                .chatId(chatId.toString())
-                .text(text)
-                .replyMarkup(markup)
                 .build());
     }
 
